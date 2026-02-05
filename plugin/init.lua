@@ -27,14 +27,39 @@ end
 
 --- adds the wezterm plugin directory to the lua path
 local function enable_sub_modules()
-    local this_file = debug.getinfo(1, "S").source:gsub("^@", "")
-    plugin_dir = this_file:match("(.*)" .. separator) or "."
+    for _, p in ipairs(wezterm.plugin.list()) do
+        if p.url:find("resurrect") then
+            plugin_dir = p.plugin_dir
+            break
+        end
+    end
+    if not plugin_dir then
+        -- plugin.list() not populated yet, construct path manually
+        local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+        local base = home .. separator .. ".local" .. separator .. "share" .. separator .. "wezterm" .. separator .. "plugins"
+        local success, dirs = pcall(wezterm.read_dir, base)
+        if success then
+            for _, dir in ipairs(dirs) do
+                if dir:find("resurrect") then
+                    plugin_dir = dir
+                    break
+                end
+            end
+        end
+    end
+    if not plugin_dir then
+        wezterm.log_error("resurrect.wezterm: could not find own plugin directory")
+        return
+    end
     package.path = package.path
             .. ";"
             .. plugin_dir
             .. separator
+            .. "plugin"
+            .. separator
             .. "?.lua"
 end
+
 
 enable_sub_modules()
 
