@@ -1,5 +1,8 @@
 local wezterm = require("wezterm")
 
+-- Capture module loader info at top level (may contain file path)
+local module_loader_info = { ... }
+
 ---@class init_module
 ---@field encryption encryption_opts
 local pub = {}
@@ -10,47 +13,88 @@ local plugin_dir
 local is_windows = wezterm.target_triple == "x86_64-pc-windows-msvc"
 local separator = is_windows and "\\" or "/"
 
---- Checks if the plugin directory exists
---- @return boolean
-local function directory_exists(path)
-	local success, result = pcall(wezterm.read_dir, plugin_dir .. path)
-	return success and result
+--- Gets the base plugins directory for the current platform
+--- @return string|nil
+local function get_plugins_base_dir()
+    if is_windows then
+        -- Windows: plugins are in %LOCALAPPDATA%/wezterm/plugins
+        local localappdata = os.getenv("LOCALAPPDATA")
+        if localappdata then
+            return localappdata .. separator .. "wezterm" .. separator .. "plugins"
+        end
+        -- Fallback for Windows
+        local userprofile = os.getenv("USERPROFILE")
+        if userprofile then
+            return userprofile .. separator .. "AppData" .. separator .. "Local" .. separator .. "wezterm" .. separator .. "plugins"
+        end
+    else
+        -- Linux/macOS: plugins are in $XDG_DATA_HOME/wezterm/plugins or ~/.local/share/wezterm/plugins
+        local xdg_data_home = os.getenv("XDG_DATA_HOME")
+        if xdg_data_home and xdg_data_home ~= "" then
+            return xdg_data_home .. separator .. "wezterm" .. separator .. "plugins"
+        end
+        local home = os.getenv("HOME")
+        if home then
+            return home .. separator .. ".local" .. separator .. "share" .. separator .. "wezterm" .. separator .. "plugins"
+        end
+    end
+    return nil
 end
 
---- Returns the name of the package, used when requiring modules
---- @return string
-function pub.get_require_path()
-	local path1 = "httpssCssZssZsgithubsDscomsZsMLFlexersZsresurrectsDswezterm"
-	local path2 = "httpssCssZssZsgithubsDscomsZsMLFlexersZsresurrectsDsweztermsZs"
-	return directory_exists(path2) and path2 or path1
+--- Checks if a path exists and is a directory
+--- @param path string
+--- @return boolean
+local function directory_exists(path)
+    local success, result = pcall(wezterm.read_dir, path)
+    return success and result ~= nil
 end
 
 --- adds the wezterm plugin directory to the lua path
 local function enable_sub_modules()
-    for _, p in ipairs(wezterm.plugin.list()) do
-        if p.url:find("resurrect") then
-            plugin_dir = p.plugin_dir
-            break
+    -- Method 1: Try to extract path from module loader info
+    -- When Lua loads a module, ... may contain the module name and/or file path
+    if module_loader_info[2] then
+        local potential_dir = module_loader_info[2]:match("(.+)[/\\]plugin[/\\]init%.lua$")
+        if potential_dir and directory_exists(potential_dir) then
+            plugin_dir = potential_dir
         end
     end
+
+    -- Method 2: Try wezterm.plugin.list() (works after initial load)
     if not plugin_dir then
-        -- plugin.list() not populated yet, construct path manually
-        local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
-        local base = home .. separator .. ".local" .. separator .. "share" .. separator .. "wezterm" .. separator .. "plugins"
-        local success, dirs = pcall(wezterm.read_dir, base)
-        if success then
-            for _, dir in ipairs(dirs) do
-                if dir:find("resurrect") then
-                    plugin_dir = dir
-                    break
+        for _, p in ipairs(wezterm.plugin.list()) do
+            if p.url:find("resurrect") then
+                plugin_dir = p.plugin_dir
+                break
+            end
+        end
+    end
+
+    -- Method 3: Scan the plugins directory
+    if not plugin_dir then
+        local base = get_plugins_base_dir()
+        if base then
+            local success, dirs = pcall(wezterm.read_dir, base)
+            if success and dirs then
+                for _, dir in ipairs(dirs) do
+                    -- Check if this directory contains our plugin by looking for a known file
+                    if dir:find("resurrect") then
+                        local test_path = dir .. separator .. "plugin" .. separator .. "resurrect"
+                        if directory_exists(test_path) then
+                            plugin_dir = dir
+                            break
+                        end
+                    end
                 end
             end
         end
     end
+
     if not plugin_dir then
         wezterm.log_error("resurrect.wezterm: could not find own plugin directory")
         return
     end
+
     package.path = package.path
             .. ";"
             .. plugin_dir
@@ -63,7 +107,14 @@ end
 
 enable_sub_modules()
 
-pub.save_state_dir = plugin_dir .. separator .. pub.get_require_path() .. separator .. "state" .. separator
+-- Default save directory inside the plugin folder
+-- Users can change this with pub.change_state_save_dir()
+if plugin_dir then
+    pub.save_state_dir = plugin_dir .. separator .. "state" .. separator
+else
+    -- Fallback to config dir if plugin_dir couldn't be found
+    pub.save_state_dir = wezterm.config_dir .. separator .. "resurrect_state" .. separator
+end
 
 ---Changes the directory to save the state to
 ---@param directory string
