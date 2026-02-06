@@ -10,60 +10,103 @@ local plugin_dir
 local is_windows = wezterm.target_triple == "x86_64-pc-windows-msvc"
 local separator = is_windows and "\\" or "/"
 
---- Checks if the plugin directory exists
---- @return boolean
-local function directory_exists(path)
-	local success, result = pcall(wezterm.read_dir, plugin_dir .. path)
-	return success and result
+--- Scans a directory for an entry whose name contains "resurrect"
+--- @param base string directory to scan
+--- @return string|nil full path to the matching entry
+local function find_resurrect_plugin_in(base)
+	local success, dirs = pcall(wezterm.read_dir, base)
+	if success and dirs then
+		for _, dir in ipairs(dirs) do
+			if dir:find("resurrect", 1, true) then
+				return dir
+			end
+		end
+	end
+	return nil
 end
 
---- Returns the name of the package, used when requiring modules
---- @return string
-function pub.get_require_path()
-	local path1 = "httpssCssZssZsgithubsDscomsZsMLFlexersZsresurrectsDswezterm"
-	local path2 = "httpssCssZssZsgithubsDscomsZsMLFlexersZsresurrectsDsweztermsZs"
-	return directory_exists(path2) and path2 or path1
+--- Builds a list of candidate plugin base directories for the current platform
+--- @return table list of directory paths to check
+local function get_plugin_base_dirs()
+	local candidates = {}
+
+	-- XDG_DATA_HOME takes priority on all platforms
+	local xdg_data = os.getenv("XDG_DATA_HOME")
+	if xdg_data and xdg_data ~= "" then
+		table.insert(candidates, xdg_data .. separator .. "wezterm" .. separator .. "plugins")
+	end
+
+	local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+	if home ~= "" then
+		-- Standard XDG path (Linux / macOS)
+		table.insert(candidates, home .. separator .. ".local" .. separator .. "share" .. separator .. "wezterm" .. separator .. "plugins")
+	end
+
+	if is_windows then
+		local localappdata = os.getenv("LOCALAPPDATA")
+		if localappdata and localappdata ~= "" then
+			table.insert(candidates, localappdata .. separator .. "wezterm" .. separator .. "plugins")
+		end
+	end
+
+	return candidates
 end
 
---- adds the wezterm plugin directory to the lua path
+--- Adds the wezterm plugin directory to the lua path so that
+--- require("resurrect.<module>") can find the submodules.
 local function enable_sub_modules()
-    for _, p in ipairs(wezterm.plugin.list()) do
-        if p.url:find("resurrect") then
-            plugin_dir = p.plugin_dir
-            break
-        end
-    end
-    if not plugin_dir then
-        -- plugin.list() not populated yet, construct path manually
-        local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
-        local base = home .. separator .. ".local" .. separator .. "share" .. separator .. "wezterm" .. separator .. "plugins"
-        local success, dirs = pcall(wezterm.read_dir, base)
-        if success then
-            for _, dir in ipairs(dirs) do
-                if dir:find("resurrect") then
-                    plugin_dir = dir
-                    break
-                end
-            end
-        end
-    end
-    if not plugin_dir then
-        wezterm.log_error("resurrect.wezterm: could not find own plugin directory")
-        return
-    end
-    package.path = package.path
-            .. ";"
-            .. plugin_dir
-            .. separator
-            .. "plugin"
-            .. separator
-            .. "?.lua"
+	-- Strategy 1: wezterm.plugin.list() — works on config reloads when
+	-- plugins have already been registered.
+	for _, p in ipairs(wezterm.plugin.list()) do
+		if p.url and p.url:find("resurrect", 1, true) then
+			plugin_dir = p.plugin_dir
+			break
+		end
+	end
+
+	-- Strategy 2: Check whether WezTerm already added our path to
+	-- package.path (some WezTerm versions do this automatically).
+	if not plugin_dir then
+		for path in package.path:gmatch("[^;]+") do
+			if path:find("resurrect", 1, true) and path:find("plugin", 1, true) then
+				-- Extract everything before /plugin/?.lua
+				local sep_pat = separator == "\\" and "\\\\" or separator
+				local dir = path:match("^(.-)" .. sep_pat .. "plugin" .. sep_pat)
+				if dir then
+					plugin_dir = dir
+					break
+				end
+			end
+		end
+	end
+
+	-- Strategy 3: Scan known plugin directories on disk.
+	if not plugin_dir then
+		for _, base in ipairs(get_plugin_base_dirs()) do
+			plugin_dir = find_resurrect_plugin_in(base)
+			if plugin_dir then
+				break
+			end
+		end
+	end
+
+	if not plugin_dir then
+		wezterm.log_error("resurrect.wezterm: could not find own plugin directory")
+		return
+	end
+
+	-- Add the plugin's module directory to package.path
+	local mod_path = plugin_dir .. separator .. "plugin" .. separator .. "?.lua"
+	if not package.path:find(mod_path, 1, true) then
+		package.path = package.path .. ";" .. mod_path
+	end
 end
 
 
 enable_sub_modules()
 
-pub.save_state_dir = plugin_dir .. separator .. pub.get_require_path() .. separator .. "state" .. separator
+-- State is stored inside the plugin's own directory tree
+pub.save_state_dir = plugin_dir and (plugin_dir .. separator .. "state" .. separator) or ""
 
 ---Changes the directory to save the state to
 ---@param directory string
